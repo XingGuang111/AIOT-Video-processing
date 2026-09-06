@@ -1,0 +1,45 @@
+# ============================================================
+# AIOT 全局统一配置（InsightfaceModel + VideoTag 共享）
+# 所有可修改参数集中于此，无需改业务代码
+# ============================================================
+
+# 全局路径与系统开关
+global:
+  capture_buffer: "capture_buffer"      # VideoCapture 输出帧缓存（只读）
+  buffer_101: "101_buffer"              # 人体检测协议输出
+  buffer_201: "201_buffer"              # 人脸特征协议输出
+  annotated_buffer: "annotated_buffer"  # 标注视频输出
+  logs_dir: "logs"                      # 分模块日志根目录
+  gpu: true                             # 启用 GPU 推理；无 GPU 自动降级 CPU
+
+# InsightfaceModel 推理模块参数
+inference:
+  fps: 10                               # 抽帧帧率
+  yolo_model: "config/models/yolov8s.pt"  # YOLOv8 权重，首次运行自动下载到此
+  yolo_conf: 0.25                       # 人体检测置信度阈值
+  person_min_pixels: 32                 # 人体框最小边长（像素），小于则丢弃
+  edge_margin: 2                        # 边缘像素过滤，紧贴画面边缘的框丢弃
+  person_min_top_margin: 8              # 顶部贴边过滤：人体框顶部距画面顶部 < 此值视为"头部被裁掉只剩下半身"，直接丢弃（避免绿框鬼影、浪费 track_id）
+  face_det_size: [640, 640]             # InsightFace 检测输入尺寸（640精度更高，优先保证准确）
+  face_root: "config"                   # buffalo_l 存于 config/models/buffalo_l，首次自动下载
+  face_gallery: ""                      # 人脸底库目录，空=face_id 顺序自增
+  face_sim_threshold: 0.5               # 底库匹配余弦相似度阈值
+  idle_timeout: 60                      # 秒，连续无新帧自动回收线程
+  tracker: "bytetrack.yaml"             # ultralytics 内置 ByteTrack 配置
+
+# VideoTag 标注模块参数
+tag:
+  segment_seconds: 60                   # 视频分段时长（秒）
+  person_color: [0, 255, 0]             # 人体框颜色 BGR（绿）
+  face_color: [0, 0, 255]               # 人脸框颜色 BGR（红）
+  roi_color: [255, 255, 255]            # ROI 框颜色 BGR（白）
+  roi: []                               # 自定义 ROI 区域 [[x1,y1,x2,y2], ...]
+  line_thickness: 2                     # 标注线条粗细
+  font_scale: 0.6                       # 标注字体大小
+  fourcc: "mp4v"                        # 视频编码，mp4v 为 OpenCV 自带；H.264 需 avc1(依赖 openh264)
+  start_ts: 0                           # 视频起始秒基准，0=用协议最早 ts
+  nvr: {}                               # NVR 摄像头访问配置（本期未实现）
+
+# 系统参数
+system:
+  log_retention_days: 7                 # 日志保留天数

@@ -1,0 +1,13 @@
+# ---- base ----
+opencv-python>=4.5.5.62
+numpy>=1.22.3
+flask>=2.3.0
+pyyaml>=6.0
+
+# ---- AI inference ----
+ultralytics>=8.0.0          # YOLOv8 person detection + built-in ByteTrack
+insightface>=0.7.3          # face detection + 512-d embedding
+onnxruntime>=1.15.0         # InsightFace backend (use onnxruntime-gpu on GPU)
+torch>=2.0.0                # YOLOv8 backend
+
+# Note: CRC32 uses stdlib zlib, crcmod not required.

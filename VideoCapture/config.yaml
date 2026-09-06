@@ -1,0 +1,18 @@
+# 全局配置
+global:
+  output_dir: "capture_buffer"         # 相对项目根(1\1)解析，与 InsightfaceModel/VideoTag 共享同一目录
+  default_fps: 25
+
+# RTSP 重连配置
+reconnect:
+  max_reconnect_times: 10
+  reconnect_interval: 1
+  max_frame_fails: 5
+
+# 缓存清理配置
+buffer_clean:
+  max_seconds: 600
+  max_frames: 0
+  max_disk_mb: 2048
+  total_max_disk_mb: 10240
+  clean_interval: 15

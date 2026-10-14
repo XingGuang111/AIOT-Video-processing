@@ -1,7 +1,6 @@
 # -*- coding: utf-8 -*-
 """统一日志工具：日志写入根目录 logs/<日期>/inference.log，并输出到控制台。"""
 import logging
-import os
 from pathlib import Path
 from datetime import datetime
 

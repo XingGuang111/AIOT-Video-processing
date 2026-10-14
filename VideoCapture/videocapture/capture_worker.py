@@ -1,262 +1,211 @@
+"""固定全帧采集；JPEG 与秒目录完成标记均原子发布。"""
 import cv2
+import json
 import math
-import shutil
-import time
+import os
 import threading
+import time
+import sys
 from pathlib import Path
 from typing import Dict, Optional
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+from runtime_metrics import Metrics
+from capture_buffers import ready_seconds, second_directories, buffer_usage
+
 from .logger import logger
 from .models import CaptureStatus, CaptureStatusEnum
 from .source_parser import desensitize_rtsp_url
 
+
 class CaptureWorker(threading.Thread):
     def __init__(self, device_no: int, source: str, source_type: str, config: Dict,
-                 sampling: float = 1.0, jpg_quality: int = 75,
-                 account: Optional[str] = None, password: Optional[str] = None, max_seconds: Optional[int] = None, max_frames: Optional[int] = None, max_disk_mb: Optional[int] = None, stop_event = None):
+                 jpg_quality: int = 75, account: Optional[str] = None,
+                 password: Optional[str] = None, max_seconds=None, max_frames=None,
+                 max_disk_mb=None, stop_event=None):
         super().__init__(daemon=True)
-        self.device_no = device_no
-        self.raw_source = source
-        self.source_type = source_type
-        self.config = config
-        self.sampling = sampling
-        self.jpg_quality = jpg_quality
-        self.account = account
-        self.password = password
-        self.max_seconds = max_seconds
-        self.max_frames = max_frames
-        self.max_disk_mb = max_disk_mb
+        self.metrics = Metrics("capture")
+        self.device_no, self.raw_source, self.source_type = device_no, source, source_type
+        self.config, self.jpg_quality = config, jpg_quality
+        self.max_seconds, self.max_frames, self.max_disk_mb = max_seconds, max_frames, max_disk_mb
         self.stop_event = stop_event or threading.Event()
-        self.lock = threading.Lock()
-
-        # 状态初始化
-        self.status = CaptureStatus(
-            device_no=device_no,
-            source=desensitize_rtsp_url(source),
-            source_type=source_type,
-            start_time=time.time()
-        )
-        self.video = None
-        self.is_live_stream = source_type in ["rtsp", "device"]
-        self.fps = 0.0
-        self.frame_step = 1
-        self.start_real_time = 0.0
-        self.frame_idx = 0
-        self.current_ts = 0
-        self.current_seq_in_sec = 0
-
-        # 重连配置
-        self.max_reconnect = config["reconnect"]["max_reconnect_times"]
-        self.reconnect_interval = config["reconnect"]["reconnect_interval"]
-        self.max_frame_fails = config["reconnect"]["max_frame_fails"]
-        self.fail_count = 0
-        self.reconnect_count = 0
-
-        # 输出目录：相对路径按项目根(videocapture→VideoCapture→根)解析，避免依赖运行时 CWD
-        self.output_dir = Path(__file__).resolve().parent.parent.parent / config["global"]["output_dir"]
-        self.device_dir = self.output_dir / f"device_{device_no}"
+        self.status = CaptureStatus(device_no=device_no, source=desensitize_rtsp_url(source),
+                                    source_type=source_type, start_time=time.time())
+        self.is_live_stream = source_type != "file"
+        self.device_dir = Path(config["global"]["output_dir"]) / f"device_{device_no}"
         self.device_dir.mkdir(parents=True, exist_ok=True)
+        self.video = None
+        self.fps = 0.0
+        self.frame_idx = 0
+        self.current_ts = None
+        self.current_seq_in_sec = 0
+        self.seconds_written = 0
+        self.start_real_time = 0.0
+        self.start_monotonic = 0.0
 
-    def _init_source(self) -> bool:
-        """初始化视频源"""
+    def _init_source(self, reconnect=False) -> bool:
         try:
             if self.video is not None:
-                try:
-                    self.video.release()
-                except:
-                    pass
-
-            if self.source_type == "device":
-                self.video = cv2.VideoCapture(int(self.raw_source))
+                self.video.release()
+            if self.source_type == "file" and not self.raw_source.lower().startswith(("http://", "https://")):
+                if not Path(self.raw_source).is_file():
+                    raise FileNotFoundError(f"本地视频文件不存在: {self.raw_source}")
+            source = int(self.raw_source) if self.source_type == "device" else self.raw_source
+            if self.source_type in ("rtsp", "stream"):
+                self.video = cv2.VideoCapture(source, cv2.CAP_FFMPEG, [
+                    cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, 10000,
+                    cv2.CAP_PROP_READ_TIMEOUT_MSEC, 10000])
             else:
-                if self.source_type == "file" and not self.raw_source.lower().startswith(("http://", "https://")):
-                    if not Path(self.raw_source).exists():
-                        raise FileNotFoundError(f"本地视频文件不存在: {self.raw_source}")
-                self.video = cv2.VideoCapture(self.raw_source)
-
+                self.video = cv2.VideoCapture(source)
             if not self.video.isOpened():
-                reason = "文件不存在或格式不支持" if self.source_type == "file" else "连接失败或地址不可达"
-                raise IOError(f"无法打开输入源 ({reason}): {self.raw_source}")
-
-            # 实时流优化
-            if self.is_live_stream:
-                self.video.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-                self.video.set(cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, 10000)
-
-            # 获取视频参数
+                raise IOError(f"无法打开输入源: {self.status.source}")
             self.fps = self.video.get(cv2.CAP_PROP_FPS)
-            if self.fps <= 0:
-                self.fps = self.config["global"]["default_fps"]
-            width = int(self.video.get(cv2.CAP_PROP_FRAME_WIDTH))
-            height = int(self.video.get(cv2.CAP_PROP_FRAME_HEIGHT))
-            self.status.resolution = (width, height)
+            if not math.isfinite(self.fps) or self.fps <= 0:
+                self.fps = float(self.config["global"]["default_fps"])
             self.status.fps = self.fps
+            self.status.resolution = (int(self.video.get(cv2.CAP_PROP_FRAME_WIDTH)),
+                                      int(self.video.get(cv2.CAP_PROP_FRAME_HEIGHT)))
             self.status.frame_count = int(self.video.get(cv2.CAP_PROP_FRAME_COUNT))
-
-            # 计算采样步长
-            if self.sampling != -1:
-                self.frame_step = math.ceil(self.sampling * self.fps)
-                if self.frame_step <= 0:
-                    self.frame_step = 1
-            else:
-                self.frame_step = 1
-
             self.status.status = CaptureStatusEnum.RUNNING
-            logger.info(f"[设备{self.device_no}] 启动成功 | 类型: {self.source_type} | 地址: {self.status.source} | 分辨率: {width}x{height} | FPS: {self.fps:.1f}")
-            self.fail_count = 0
-            self.reconnect_count = 0
+            logger.info("[设备%d] 全帧采集启动 | %s | FPS %.3f", self.device_no, self.status.source, self.fps)
             return True
-        except Exception as e:
-            self.status.last_error = str(e)
-            self.status.status = CaptureStatusEnum.ERROR
-            logger.error(f"[设备{self.device_no}] 初始化失败: {e}")
+        except Exception as exc:
+            self.status.last_error = str(exc).replace(self.raw_source, self.status.source)
+            self.status.status = CaptureStatusEnum.RECONNECTING if reconnect else CaptureStatusEnum.ERROR
+            logger.error("[设备%d] 初始化失败: %s", self.device_no, self.status.last_error)
             return False
 
-    def run(self):
-        """主采集循环"""
-        if not self._init_source():
+    def _finish_second(self):
+        if self.current_ts is None or not self.current_seq_in_sec:
             return
-
-        self.start_real_time = time.time()
-        self.current_ts = 0
+        directory = self.device_dir / str(self.current_ts)
+        tmp = directory / "_ready.json.tmp"
+        with tmp.open("w", encoding="utf-8") as handle:
+            json.dump({"fps": self.fps, "frames": self.current_seq_in_sec}, handle)
+        os.replace(tmp, directory / "_ready.json")
+        (directory / "_writing").unlink(missing_ok=True)
+        self.seconds_written += 1
+        self.metrics.data.update(processed=self.seconds_written, frames=self.status.frames_captured)
+        self.metrics.publish()
+        logger.info("[设备%d] 秒目录完成 ts=%d 帧=%d", self.device_no,
+                    self.current_ts, self.current_seq_in_sec)
+        self.current_ts = None
         self.current_seq_in_sec = 0
-
-        while not self.stop_event.is_set():
-            try:
-                with self.lock:
-                    if self.stop_event.is_set():
-                        break
-                    ret, frame = self.video.read()
-                    if not ret:
-                        self.fail_count += 1
-                        self.status.last_error = f"读帧失败第{self.fail_count}次"
-                        if self.source_type == "file":
-                            if self.fail_count >= 3:
-                                logger.info(f"[设备{self.device_no}] 视频读取完成，共采集{self.status.frames_captured}帧")
-                                self.status.status = CaptureStatusEnum.FINISHED
-                                break
-                            time.sleep(0.1)
-                            continue
-                        # 流模式重试重连
-                        if self.fail_count >= self.max_frame_fails:
-                            if self.reconnect_count >= self.max_reconnect:
-                                logger.error(f"[设备{self.device_no}] 重连超过最大次数，停止采集")
-                                self.status.status = CaptureStatusEnum.ERROR
-                                break
-                            self.status.status = CaptureStatusEnum.RECONNECTING
-                            logger.warning(f"[设备{self.device_no}] 连续读帧失败，第{self.reconnect_count+1}次重连")
-                            time.sleep(self.reconnect_interval)
-                            if self._init_source():
-                                continue
-                            else:
-                                self.reconnect_count += 1
-                                continue
-                        time.sleep(self.reconnect_interval)
-                        continue
-
-                # 重置失败计数
-                self.fail_count = 0
-
-                # 限速（文件模式全量提取时模拟真实播放速度）
-                if self.source_type == "file" and self.sampling == -1:
-                    expected_elapsed = self.frame_idx / self.fps
-                    actual_elapsed = time.time() - self.start_real_time
-                    sleep_time = expected_elapsed - actual_elapsed
-                    if sleep_time > 0:
-                        time.sleep(sleep_time)
-
-                # 计算时间戳
-                if self.is_live_stream:
-                    ts = int(time.time())
+        if os.environ.get("AIOT_PIPELINE_STATE"):
+            limit = max(1, int(self.config["global"].get("max_buffer_seconds", 8)))
+            while not self.stop_event.is_set():
+                try:
+                    progress = json.loads((Path(os.environ['AIOT_PIPELINE_STATE']) / 'tag.metrics.json').read_text(encoding='utf-8'))
+                    consumed = int(progress.get('last_ts', self.start_real_time - 1))
+                except (OSError, ValueError):
+                    consumed = self.start_real_time - 1
+                if self.config['global'].get('buffer_mode') == 'runtime':
+                    # Occupied consumed files count too: storage cannot grow past the limit.
+                    pending = len(second_directories(self.device_dir, self.start_real_time))
                 else:
-                    ts = int(self.start_real_time + (self.frame_idx / self.fps))
+                    pending = len(ready_seconds(self.device_dir, consumed + 1))
+                if pending < limit:
+                    break
+                self.stop_event.wait(0.05)
 
-                if ts != self.current_ts:
-                    self.current_ts = ts
-                    self.current_seq_in_sec = 0
-
-                # 保存帧
-                ts_dir = self.device_dir / str(ts)
-                ts_dir.mkdir(exist_ok=True)
-                frame_path = ts_dir / f"frame_{self.current_seq_in_sec:06d}.jpg"
-                encode_param = [int(cv2.IMWRITE_JPEG_QUALITY), self.jpg_quality]
-                cv2.imencode(".jpg", frame, encode_param)[1].tofile(str(frame_path))
-
-                # 更新状态
-                self.status.frames_captured += 1
-                self.current_seq_in_sec += 1
-
-                # 实时流超时检查
-                if self.is_live_stream and self.max_seconds:
-                    if time.time() - self.start_real_time >= self.max_seconds:
-                        logger.info(f"[设备{self.device_no}] 达到最大采集时长 {self.max_seconds}s，自动停止")
+    def run(self):
+        if not self._init_source():
+            self.release()
+            return
+        self.start_real_time = int(os.environ.get("AIOT_PIPELINE_START_TS", str(int(time.time()))))
+        self.start_monotonic = time.monotonic()
+        reconnects = fails = 0
+        rc = self.config["reconnect"]
+        try:
+            while not self.stop_event.is_set():
+                with self.metrics.measure("decode"):
+                    ret, frame = self.video.read()
+                if not ret:
+                    if not self.is_live_stream:
+                        if self.status.frame_count > 0 and self.frame_idx < self.status.frame_count:
+                            raise IOError(f"视频提前结束: {self.frame_idx}/{self.status.frame_count} 帧")
                         self.status.status = CaptureStatusEnum.FINISHED
                         break
-
-                # 帧数 / 磁盘限制（每 30 帧检查一次）
-                if self.status.frames_captured % 30 == 0:
-                    if self.max_frames:
-                        self._enforce_max_frames()
-                    if self.max_disk_mb:
-                        self._enforce_max_disk()
-
-                # 采样跳帧
-                if self.sampling != -1:
-                    self.frame_idx += self.frame_step
-                    self.video.set(cv2.CAP_PROP_POS_FRAMES, self.frame_idx)
+                    fails += 1
+                    self._finish_second()
+                    if fails >= rc["max_frame_fails"]:
+                        if reconnects >= rc["max_reconnect_times"]:
+                            raise IOError("重连超过最大次数")
+                        reconnects += 1
+                        self.status.status = CaptureStatusEnum.RECONNECTING
+                        logger.warning("[设备%d] 断流重连 %d", self.device_no, reconnects)
+                        if self.stop_event.wait(rc["reconnect_interval"]):
+                            break
+                        self._init_source(reconnect=True)
+                    elif self.stop_event.wait(rc["reconnect_interval"]):
+                        break
+                    continue
+                fails = reconnects = 0
+                self.status.status = CaptureStatusEnum.RUNNING
+                if not self.is_live_stream:
+                    # 本地文件默认尽快读完，避免采集端把整个流水线锁在视频时长。
+                    # 实时流仍按真实帧率运行；可用 global.file_realtime=true 恢复文件实时节奏。
+                    if self.config["global"].get("file_realtime", False):
+                        delay = self.frame_idx / self.fps - (time.monotonic() - self.start_monotonic)
+                        if delay > 0 and self.stop_event.wait(delay):
+                            break
+                    ts = int(self.start_real_time + self.frame_idx / self.fps)
                 else:
-                    self.frame_idx += 1
+                    ts = int(time.time())
+                    if (self.device_dir / str(ts) / "_ready.json").exists():
+                        if self.stop_event.wait(max(0.001, ts + 1 - time.time())):
+                            break
+                        ts = int(time.time())
+                if ts != self.current_ts:
+                    self._finish_second()
+                    directory = self.device_dir / str(ts)
+                    directory.mkdir(exist_ok=False)
+                    (directory / "_writing").touch()
+                    self.current_ts = ts
+                directory = self.device_dir / str(ts)
+                destination = directory / f"frame_{self.current_seq_in_sec:06d}.jpg"
+                tmp = destination.with_suffix(".jpg.tmp")
+                with self.metrics.measure("jpeg_encode"):
+                    ok, encoded = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, self.jpg_quality])
+                if not ok:
+                    raise IOError("JPEG 编码失败")
+                with self.metrics.measure("frame_write"):
+                    encoded.tofile(str(tmp))
+                    os.replace(tmp, destination)
+                self.current_seq_in_sec += 1
+                self.frame_idx += 1
+                self.status.frames_captured += 1
+                if self.is_live_stream and self.max_seconds and time.monotonic() - self.start_monotonic >= self.max_seconds:
+                    self.status.status = CaptureStatusEnum.FINISHED
+                    break
+                if self.status.frames_captured % 30 == 0:
+                    self._check_capacity()
+            self._finish_second()
+        except Exception as exc:
+            self.status.last_error = str(exc).replace(self.raw_source, self.status.source)
+            self.status.status = CaptureStatusEnum.ERROR
+            logger.exception("[设备%d] 采集失败: %s", self.device_no, self.status.last_error)
+        finally:
+            self.metrics.publish(finished=True)
+            self.release()
+            logger.info("[设备%d] 已停止，帧=%d 秒=%d 状态=%s", self.device_no,
+                        self.status.frames_captured, self.seconds_written, self.status.status.value)
 
-            except Exception as e:
-                self.status.last_error = str(e)
-                logger.error(f"[设备{self.device_no}] 采集异常: {e}")
-                time.sleep(0.5)
-
-        self.release()
-        logger.info(f"[设备{self.device_no}] 已停止，共采集{self.status.frames_captured}帧")
+    def _check_capacity(self):
+        frames, size = buffer_usage(self.device_dir)
+        if self.max_frames and frames > self.max_frames:
+            raise IOError("未消费帧数超过 max_frames；停止采集以保留积压数据")
+        if self.max_disk_mb and size > self.max_disk_mb * 1024 * 1024:
+            raise IOError("未消费帧超过 max_disk_mb；停止采集以保留积压数据")
 
     def release(self):
-        """释放资源"""
         if self.video is not None:
-            try:
-                self.video.release()
-            except:
-                pass
-        cv2.destroyAllWindows()
-        self.status.status = CaptureStatusEnum.STOPPED
-
-    def _enforce_max_frames(self):
-        """帧数超限则删除最旧秒目录"""
-        ts_dirs = sorted(
-            [d for d in self.device_dir.iterdir() if d.is_dir() and d.name.isdigit()],
-            key=lambda d: int(d.name)
-        )
-        total = sum(len(list(d.glob("*.jpg"))) for d in ts_dirs)
-        while total > self.max_frames and len(ts_dirs) > 1:
-            oldest = ts_dirs.pop(0)
-            count = len(list(oldest.glob("*.jpg")))
-            shutil.rmtree(oldest, ignore_errors=True)
-            total -= count
-            logger.info(f"[设备{self.device_no}] 帧数限制：删除 {oldest.name}（{count} 帧）")
-
-    def _enforce_max_disk(self):
-        """磁盘超限则删除最旧秒目录"""
-        ts_dirs = sorted(
-            [d for d in self.device_dir.iterdir() if d.is_dir() and d.name.isdigit()],
-            key=lambda d: int(d.name)
-        )
-        max_bytes = self.max_disk_mb * 1024 * 1024
-        total = sum(sum(f.stat().st_size for f in d.rglob("*") if f.is_file()) for d in ts_dirs)
-        while total > max_bytes and len(ts_dirs) > 1:
-            oldest = ts_dirs.pop(0)
-            sz = sum(f.stat().st_size for f in oldest.rglob("*") if f.is_file())
-            shutil.rmtree(oldest, ignore_errors=True)
-            total -= sz
-            logger.info(f"[设备{self.device_no}] 磁盘限制：删除 {oldest.name}（{sz/1024/1024:.1f}MB）")
+            self.video.release()
+            self.video = None
+        if self.status.status not in (CaptureStatusEnum.ERROR, CaptureStatusEnum.FINISHED):
+            self.status.status = CaptureStatusEnum.STOPPED
 
     def stop(self):
-        """停止采集"""
         self.stop_event.set()
-        with self.lock:
-            self.release()
         if self.is_alive():
-            self.join(timeout=3)
+            self.join(timeout=12)

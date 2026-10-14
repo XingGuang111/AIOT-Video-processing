@@ -16,7 +16,7 @@ def start_capture(
     account: Optional[str] = None,
     password: Optional[str] = None,
     device_no: Optional[int] = None,
-    output_dir: str = "extracted_frames",
+    output_dir: str = "capture_buffer",
     jpg_quality: int = 75,
     max_seconds: Optional[int] = None,
     max_frames: Optional[int] = None,

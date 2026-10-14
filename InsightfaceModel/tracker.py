@@ -1,64 +1,68 @@
-# -*- coding: utf-8 -*-
-"""引擎层：ByteTrack 多目标跟踪封装 + 连续人数编号。
-
-track_id 由 ultralytics 内置 ByteTrack 在 PersonDetector.detect(persist=True)
-中持续产生，但其原始 id 会跳变。本模块负责：把原始 id 映射为从 1 递增的
-连续人数编号（每出现一个新轨迹 +1），记录每个 track 最近出现时间，定时清理
-长期消失轨迹，并支持设备重启/空闲回收时整体复位。
-"""
+"""Recover short ByteTrack fragments with conservative one-to-one spatial matching."""
 import time
-from typing import Dict, List
-
-from .logger import logger
 
 
 class Tracker:
-    def __init__(self, tracker_cfg: str = "bytetrack.yaml", lost_timeout: float = 30.0):
-        self.tracker_cfg = tracker_cfg
+    def __init__(self, lost_timeout=30.0, recovery_timeout=3.0):
         self.lost_timeout = lost_timeout
-        self._last_seen: Dict[int, float] = {}     # ByteTrack 原始 id -> 最近出现时间
-        self._seq_map: Dict[int, int] = {}         # ByteTrack 原始 id -> 顺序人数编号
-        self._next_seq = 1                         # 下一个待分配的顺序编号（从 1 起）
+        self.recovery_timeout = recovery_timeout
+        self._seq_map = {}
+        self._tracks = {}
+        self._next_seq = 1
 
-    def update(self, detections: List[Dict], now: float = None) -> List[Dict]:
-        """登记本帧轨迹并把 track_id 原地改写为连续人数编号。
+    @staticmethod
+    def _score(box, previous):
+        ax, ay, bx, by = box
+        cx, cy, dx, dy = previous
+        area = max(0, bx-ax)*max(0, by-ay)
+        other = max(0, dx-cx)*max(0, dy-cy)
+        overlap = max(0, min(bx, dx)-max(ax, cx))*max(0, min(by, dy)-max(ay, cy))
+        if min(area, other) <= 0 or min(area, other)/max(area, other) < 0.5:
+            return 0.0
+        return overlap / max(1, area+other-overlap)
 
-        ByteTrack 原始 id 会因抽帧断裂、目标重进等跳变，不适合直接当人数。
-        本方法为每个首次出现的原始 id 分配递增编号（1,2,3…），使
-        "出现一个新人 +1"。编号只增不复用，累计总人数即最大已分配编号。
-        """
-        now = now if now is not None else time.time()
-        for d in detections:
-            raw = d.get("track_id", -1)
+    def update(self, detections, now=None):
+        now = time.time() if now is None else now
+        stale = {tid for tid, state in self._tracks.items() if now-state[0] > self.lost_timeout}
+        for tid in stale:
+            del self._tracks[tid]
+        self._seq_map = {raw: tid for raw, tid in self._seq_map.items() if tid not in stale}
+        assigned, used = {}, set()
+        for i, detection in enumerate(detections):
+            tid = self._seq_map.get(detection.get('track_id', -1))
+            if tid is not None and tid not in used:
+                assigned[i] = tid
+                used.add(tid)
+        candidates = []
+        for i, detection in enumerate(detections):
+            if i in assigned or detection.get('track_id', -1) < 0:
+                continue
+            for tid, (last, box) in self._tracks.items():
+                if tid in used or not 0 <= now-last <= self.recovery_timeout:
+                    continue
+                score = self._score(detection['xyxy'], box)
+                if score >= 0.45:
+                    candidates.append((score, i, tid))
+        for score, i, tid in sorted(candidates, reverse=True):
+            if i not in assigned and tid not in used:
+                assigned[i] = tid
+                used.add(tid)
+        for i, detection in enumerate(detections):
+            raw = detection.get('track_id', -1)
             if raw < 0:
-                continue  # ByteTrack 未分配，保持 -1（下游按未跟踪处理）
-            if raw not in self._seq_map:
-                self._seq_map[raw] = self._next_seq
+                continue
+            tid = assigned.get(i)
+            if tid is None:
+                tid = self._next_seq
                 self._next_seq += 1
-            d["track_id"] = self._seq_map[raw]  # 原地改写为顺序编号
-            self._last_seen[raw] = now
-        self._cleanup(now)
+            # Remove obsolete aliases so a revived old raw ID cannot steal this track.
+            self._seq_map = {key: value for key, value in self._seq_map.items() if value != tid or key == raw}
+            self._seq_map[raw] = tid
+            self._tracks[tid] = (now, tuple(detection['xyxy']))
+            detection['track_id'] = tid
         return detections
 
-    def _cleanup(self, now: float) -> None:
-        stale = [tid for tid, ts in self._last_seen.items() if now - ts > self.lost_timeout]
-        for tid in stale:
-            del self._last_seen[tid]
-            self._seq_map.pop(tid, None)  # 一并清理映射，避免长期运行内存增长
-        if stale:
-            logger.debug("[Tracker] 清理消失轨迹: %s", stale)
-
-    @property
-    def active_count(self) -> int:
-        return len(self._last_seen)
-
-    @property
-    def total_count(self) -> int:
-        """累计出现过的不同人数（等于最大已分配顺序编号）。"""
-        return self._next_seq - 1
-
-    def reset(self) -> None:
-        """复位跟踪记账（设备空闲回收/重启时调用）。"""
-        self._last_seen.clear()
+    def reset(self):
         self._seq_map.clear()
+        self._tracks.clear()
         self._next_seq = 1

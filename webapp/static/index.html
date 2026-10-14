@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>AIOT · 视频分析工作台</title>
+  <link rel="stylesheet" href="/static/style.css">
+  <script src="/static/app.js" defer></script>
+</head>
+<body>
+  <header class="topbar"><a class="brand" href="/" aria-label="AIOT 首页"><span class="brand-icon">◈</span><b>AIOT</b><span>视频分析工作台</span></a><div class="connection"><i id="connection-dot"></i><span id="connection">正在连接</span><span class="clock" id="clock"></span></div></header>
+  <main>
+    <div class="heading"><div><div class="eyebrow">VIDEO INTELLIGENCE / CONTROL ROOM</div><h1>让分析结果，随画面到来。</h1><p>采集、识别、标注并行处理，在这里查看每一秒的输出。</p></div><span class="mode-badge"><i></i> 秒级流水线</span></div>
+    <div class="workspace">
+      <aside>
+        <section class="panel source-panel"><div class="section-label"><span class="step">01</span><h2>创建分析任务</h2></div>
+          <form id="start-form">
+            <label for="source">视频来源</label><textarea id="source" rows="3" placeholder="输入 RTSP 地址或本机视频路径" required></textarea>
+            <div class="source-actions"><label class="upload-button" for="file-input">↥ 上传视频</label><input id="file-input" type="file" accept="video/*,.mkv,.avi,.ts" hidden><select id="samples" aria-label="选择示例视频"><option value="">使用示例视频</option></select></div>
+            <div class="upload-status" id="upload-status" aria-live="polite"></div>
+            <label for="device">设备编号</label><input id="device" type="number" min="0" max="4294967295" value="0" required>
+            <p class="field-hint">同一设备同时运行一个任务；本地文件处理完后自动结束。</p>
+            <label for="buffer-mode">中间文件保存方式</label>
+            <select id="buffer-mode"><option value="test">测试模式：保留全部中间文件</option><option value="runtime">运行模式：使用后自动删除中间文件</option></select>
+            <p class="field-hint">运行模式会清理该设备历史中间缓存，并在运行中逐秒删除已用完的原始帧、101/201 文件和逐帧标注，占用文件自动重试；测试模式全部保留。完整视频、一秒片段和日志始终保留。</p>
+            <button class="primary" id="start-button" type="submit"><span>▶</span> 开始分析</button>
+          </form>
+          <div class="notice">先缓冲两个片段，从第一秒按顺序播放；结果暂未就绪时等待，避免跳秒。</div>
+        </section>
+        <section class="panel jobs-panel"><div class="section-label"><span class="step">02</span><h2>分析任务</h2><button id="clear-records" class="text-button" type="button">清理记录</button><span class="count" id="job-count">0</span></div><label class="history-toggle previous-tasks-toggle"><input id="show-previous-tasks" type="checkbox">查看之前的任务（含运行中）</label><div id="jobs" class="jobs"><div class="empty-small">本页面尚未创建任务，添加视频开始分析。</div></div></section>
+      </aside>
+      <div class="main-column">
+        <section class="metrics"><div class="metric"><span>已输出片段</span><b id="segments">—</b><small>按秒发布</small></div><div class="metric"><span>等待消费</span><b id="pending">—</b><small id="pending-detail">秒目录</small></div><div class="metric"><span>累计轨迹</span><b id="tracks">—</b><small>人体轨迹编号累计值</small></div><div class="metric"><span>运行时长</span><b id="elapsed">—</b><small id="job-status">等待任务</small></div></section>
+        <section class="panel preview-panel"><div class="preview-toolbar"><div class="section-label"><span class="step">03</span><h2>标注画面</h2><span id="preview-state" class="status neutral">等待输出</span></div><div class="preview-actions"><select id="device-select" aria-label="选择查看设备"><option value="0">设备 0</option></select><button id="live-button" class="text-button active" type="button">● 顺序播放</button></div></div>
+          <div class="screen"><img id="preview" alt="标注视频实时画面" hidden><div class="screen-empty" id="screen-empty"><div class="viewfinder"><span></span>◉</div><h3>等待第一段分析结果</h3><p>启动任务后，完成的标注画面会自动显示在这里。</p></div><div class="screen-overlay" id="screen-overlay" hidden><span id="screen-device">DEVICE 00</span><span id="screen-time"></span></div></div>
+          <div class="preview-footer"><span id="preview-caption">尚未选择视频结果</span><a id="download" hidden>↓ 下载原始标注视频</a></div>
+          <div class="playback-controls"><button id="play-toggle" type="button" disabled>暂停</button><span id="play-position">00:00</span><input id="play-progress" type="range" min="0" max="0" step="0.01" value="0" disabled aria-label="标注视频播放进度"><span id="play-available">00:00</span></div>
+          <p class="playback-hint" id="play-hint">等待视频生成；进度条仅开放已生成的部分，可以向前拖拽回看。</p>
+          <div class="stages"><div><i id="stage-capture"></i><span>全帧采集</span><small id="capture-label">等待</small></div><span class="stage-arrow">→</span><div><i id="stage-inference"></i><span>人脸 / 人体推理</span><small id="inference-label">等待</small></div><span class="stage-arrow">→</span><div><i id="stage-tag"></i><span>逐秒标注输出</span><small id="tag-label">等待</small></div></div>
+        </section>
+        <section class="panel timing-panel"><div class="section-label"><h2>任务详情与耗时</h2><span id="compute-device" class="count">等待模型</span></div><p id="task-detail">选择任务查看处理统计。</p><div id="full-output"></div><p class="timing-note">各步骤显示累计实际调用耗时，平均值按调用次数计算。采集、推理和标注并行运行，耗时不能相加；人脸项包含检测与特征提取。</p><div class="timing-scroll"><table class="timing-table"><thead><tr><th>处理步骤</th><th>累计耗时</th><th>调用次数</th><th>平均耗时</th></tr></thead><tbody id="timing-rows"></tbody></table></div></section>
+        <section class="panel results-panel"><div class="results-header"><div class="section-label"><span class="step">04</span><h2>输出片段</h2><span id="result-count" class="count">0</span></div></div><div id="results" class="results-grid"><div class="results-empty">每完成一秒的处理，这里就会出现一个可回看的片段。</div></div></section>
+        <section class="panel log-panel"><details><summary><span>运行日志</span><span class="log-hint">展开查看处理进度与错误</span></summary><div id="process-events" class="process-events" aria-live="polite"></div><details class="raw-log"><summary>原始日志</summary><pre id="logs">选择任务后显示运行日志。</pre></details></details></section>
+      </div>
+    </div>
+    <footer>AIOT / 视频结构化分析 <span>全帧采集 · InsightFace · 按秒输出</span></footer>
+  </main>
+  <script src="/static/player.js" defer></script>
+  <div id="toast" class="toast" role="status" hidden></div>
+</body>
+</html>

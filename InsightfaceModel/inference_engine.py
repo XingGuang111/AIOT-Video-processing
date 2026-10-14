@@ -6,6 +6,8 @@
 两者均为薄封装，权重首次运行自动下载。
 """
 from typing import Dict, List, Optional, Tuple
+from pathlib import Path
+import os
 
 import numpy as np
 
@@ -59,9 +61,10 @@ class PersonDetector:
 
     def __init__(self, model_path: str, conf: float = 0.25, gpu: bool = True,
                  tracker: str = "bytetrack.yaml", min_pixels: int = 0, edge_margin: int = 0,
-                 min_top_margin: int = 0):
+                 min_top_margin: int = 0, half: bool = True):
         from ultralytics import YOLO  # 延迟导入，避免无依赖时模块导入即失败
         import torch
+        import cv2
 
         self.conf = conf
         self.tracker = tracker
@@ -72,9 +75,13 @@ class PersonDetector:
         self.min_top_margin = min_top_margin
         # 自动探测 CUDA，不可用则降级 CPU
         use_gpu = gpu and torch.cuda.is_available()
+        if use_gpu:
+            torch.set_num_threads(1)
+            cv2.setNumThreads(1)
         if gpu and not use_gpu:
             logger.warning("[Engine] 未检测到可用 CUDA，YOLO 自动降级为 CPU")
         self.device = 0 if use_gpu else "cpu"
+        self.half = bool(half and use_gpu)
         logger.info("[Engine] 加载 YOLOv8 模型: %s (device=%s)", model_path, self.device)
         self.model = YOLO(model_path)
 
@@ -85,7 +92,7 @@ class PersonDetector:
         """
         results = self.model.track(
             frame, classes=[PERSON_CLASS_ID], conf=self.conf,
-            persist=True, tracker=self.tracker, device=self.device, verbose=False,
+            persist=True, tracker=self.tracker, device=self.device, half=self.half, verbose=False,
         )
         out: List[Dict] = []
         if not results:
@@ -124,21 +131,32 @@ class FaceEmbedder:
     """InsightFace buffalo_l：人脸检测 + 512 维 embedding。"""
 
     def __init__(self, gpu: bool = True, det_size=(640, 640), root: Optional[str] = None):
-        from insightface.app import FaceAnalysis  # 延迟导入
+        from insightface.model_zoo.scrfd import SCRFD
+        from insightface.model_zoo.arcface_onnx import ArcFaceONNX
+        from insightface.utils.storage import ensure_available
         import onnxruntime as ort
 
         # 自动探测 onnxruntime 是否有 CUDA provider，不可用则降级 CPU
         use_gpu = gpu and ("CUDAExecutionProvider" in ort.get_available_providers())
         if gpu and not use_gpu:
             logger.warning("[Engine] onnxruntime 无 CUDA provider，InsightFace 自动降级为 CPU")
-        providers = (["CUDAExecutionProvider", "CPUExecutionProvider"]
+        providers = ([("CUDAExecutionProvider", {"cudnn_conv_algo_search": "HEURISTIC"}), "CPUExecutionProvider"]
                      if use_gpu else ["CPUExecutionProvider"])
-        kwargs = {"name": "buffalo_l", "providers": providers}
-        if root:
-            kwargs["root"] = root
         logger.info("[Engine] 加载 InsightFace buffalo_l (gpu=%s)", use_gpu)
-        self.app = FaceAnalysis(**kwargs)
-        self.app.prepare(ctx_id=0 if use_gpu else -1, det_size=tuple(det_size))
+        model_dir = Path(ensure_available('models', 'buffalo_l', root=root or '~/.insightface'))
+        # Only initialize the two models used, avoiding unused landmark/age sessions.
+        options = ort.SessionOptions()
+        options.intra_op_num_threads = 1 if use_gpu else max(1, min(4, os.cpu_count() or 1))
+        options.inter_op_num_threads = 1
+        detection_path = str(model_dir / 'det_10g.onnx')
+        recognition_path = str(model_dir / 'w600k_r50.onnx')
+        self.detector = SCRFD(model_file=detection_path,
+                              session=ort.InferenceSession(detection_path, sess_options=options, providers=providers))
+        self.recognizer = ArcFaceONNX(model_file=recognition_path,
+                                      session=ort.InferenceSession(recognition_path, sess_options=options, providers=providers))
+        self.detector.prepare(ctx_id=0 if use_gpu else -1, input_size=tuple(det_size), det_thresh=0.5)
+        self.recognizer.prepare(ctx_id=0 if use_gpu else -1)
+        self.providers = self.detector.session.get_providers()
 
     def embed(self, img_bgr: np.ndarray) -> List[Dict]:
         """检测人脸并提取特征，返回 [{xyxy, conf, embedding(512,)}]。
@@ -148,16 +166,20 @@ class FaceEmbedder:
         if img_bgr is None or img_bgr.size == 0:
             return []
         h, w = img_bgr.shape[:2]
-        faces = self.app.get(img_bgr)
+        from insightface.app.common import Face
+        bboxes, landmarks = self.detector.detect(img_bgr, max_num=0, metric='default')
         out: List[Dict] = []
-        for f in faces:
-            if f.det_score < 0.3:  # 低阈值优先保证不漏检真人脸
+        for index, bbox in enumerate(bboxes):
+            if bbox[4] < 0.3:
                 continue
-            x1, y1, x2, y2 = (int(v) for v in f.bbox)
+            x1, y1, x2, y2 = (int(v) for v in bbox[:4])
             bw, bh = x2 - x1, y2 - y1
             # 尺寸过滤：人脸不可能太大（>画面1/3）或太小（<20px）或长宽比离谱
             if bw < 20 or bh < 20 or bw > w / 3 or bh > h / 3 or bw / bh > 2 or bh / bw > 2:
                 continue
+            f = Face(bbox=bbox[:4], kps=landmarks[index] if landmarks is not None else None,
+                     det_score=bbox[4])
+            self.recognizer.get(img_bgr, f)
             out.append({
                 "xyxy": (x1, y1, x2, y2),
                 "conf": float(f.det_score),

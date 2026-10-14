@@ -18,19 +18,19 @@ def parse_device_no(device: str) -> int:
 class TagWorker(threading.Thread):
     """单设备标注线程。"""
 
-    def __init__(self, device_no: int, source: str, config: Dict):
+    def __init__(self, device_no: int, source: str, config: Dict, follow: bool = False):
         super().__init__(daemon=True)
         self.device_no = device_no
         self.source = source
         self.stop_event = threading.Event()
-        self.processor = SegmentProcessor(device_no, source, config)
+        self.processor = SegmentProcessor(device_no, source, config, follow=follow)
         self.start_time = time.time()
         self.error: Optional[str] = None
         self.segments = 0
 
     def run(self) -> None:
         try:
-            self.segments = self.processor.run(self.stop_event)
+            self.segments = self.processor.run(self.stop_event)#调用 SegmentProcessor 的 run 方法，传入停止事件对象，真正的标注逻辑在 SegmentProcessor 中执行
         except Exception as e:
             self.error = str(e)
             logger.exception("[设备%d] 标注线程异常", self.device_no)
@@ -44,7 +44,9 @@ class TagWorker(threading.Thread):
         return {
             "device_no": self.device_no,
             "alive": self.is_alive(),
-            "segments": self.segments,
+            "segments": self.processor.segments if self.processor.follow else self.segments,
+            "failed": self.processor.failed,
+            "skipped": self.processor.skipped,
             "uptime": round(time.time() - self.start_time, 1),
             "error": self.error,
         }
@@ -58,15 +60,15 @@ class TagManager:
         self._workers: Dict[int, TagWorker] = {}
         self._lock = threading.Lock()
 
-    def start(self, source: str, device_no, ) -> int:
+    def start(self, source: str, device_no, follow: bool = False) -> int:
         dno = parse_device_no(device_no)
         with self._lock:
-            existing = self._workers.get(dno)
+            existing = self._workers.get(dno)#开始标注任务前，先检查是否已有该设备的标注任务在运行
             if existing and existing.is_alive():
                 raise RuntimeError(f"设备 {dno} 标注任务已在运行")
-            worker = TagWorker(dno, source, self.config)
+            worker = TagWorker(dno, source, self.config, follow=follow)
             self._workers[dno] = worker
-        worker.start()
+        worker.start()#调用 TagWorker 的 start 方法，启动标注任务
         logger.info("[Manager] 设备 %d 标注任务已启动，源: %s", dno, source)
         return dno
 

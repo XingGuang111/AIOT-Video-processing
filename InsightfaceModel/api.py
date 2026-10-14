@@ -34,7 +34,7 @@ def start():
     device_no = body.get("device_no", "device_0")
     fps = body.get("fps")
     try:
-        dno = manager.start(device_no, fps=fps)
+        dno = manager.start(device_no, fps=fps)#调用 InferenceManager 的 start 方法，传入设备号和帧率，返回设备号（int）
         return _ok(f"设备 {dno} 推理任务已启动", {"device_no": dno})
     except Exception as e:
         logger.exception("启动推理失败")

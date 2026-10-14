@@ -1,13 +1,9 @@
 # -*- coding: utf-8 -*-
-"""数据层：101/201 二进制协议校验、解析，按时间戳重组内存数据。
-
-协议格式与 InsightfaceModel/protocol_encoder.py 严格一致（模块间不互相导入，
-按 README「目录解耦、无代码导入依赖」约束各自实现同一格式）。
-"""
+"""Validate and decode the shared 101/201 binary format independently of the inference module."""
 import struct
 import zlib
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List
 
 import numpy as np
 

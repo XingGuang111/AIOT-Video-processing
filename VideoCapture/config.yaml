@@ -3,6 +3,9 @@ global:
   output_dir: "capture_buffer"         # 相对项目根(1\1)解析，与 InsightfaceModel/VideoTag 共享同一目录
   default_fps: 25
 
+extract:
+  jpg_quality: 75
+
 # RTSP 重连配置
 reconnect:
   max_reconnect_times: 10

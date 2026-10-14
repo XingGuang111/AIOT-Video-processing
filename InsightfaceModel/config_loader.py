@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 """配置层：加载并校验根目录 config/config.yaml 全局参数。"""
 import yaml
+import os
 from pathlib import Path
 from typing import Any, Dict
 
@@ -32,6 +33,7 @@ def load_config(path: Path = CONFIG_PATH) -> Dict:
     返回校验并处理后的配置字典（其中路径字段已被就地改写为绝对路径）。
     """
     # 文件不存在直接报错，避免后续 open 抛出难以理解的异常
+    path = Path(os.environ.get("AIOT_CONFIG_PATH", str(path)))
     if not Path(path).exists():
         raise ConfigError(f"配置文件不存在：{path}")
     with open(path, "r", encoding="utf-8") as f:
@@ -53,12 +55,16 @@ def load_config(path: Path = CONFIG_PATH) -> Dict:
     # 阈值越界校验：确保数值参数落在合理区间内
     if inf["fps"] <= 0:
         raise ConfigError("inference.fps 必须为正数")
+    if float(inf.get("face_fps", inf["fps"])) <= 0 or float(inf.get("face_fps", inf["fps"])) > inf["fps"]:
+        raise ConfigError("inference.face_fps 必须在 (0, inference.fps] 区间")
     if not (0.0 <= float(inf["yolo_conf"]) <= 1.0):
         raise ConfigError("inference.yolo_conf 必须在 [0,1] 区间")
     if inf["person_min_pixels"] < 0:
         raise ConfigError("inference.person_min_pixels 不能为负")
     if inf["idle_timeout"] <= 0:
         raise ConfigError("inference.idle_timeout 必须为正数")
+    if not 0 <= float(inf.get("face_sim_threshold", 0.6)) <= 1:
+        raise ConfigError("inference.face_sim_threshold 必须在 [0,1]")
 
     # 路径转为绝对（相对根目录解析）：仅对已配置且为相对路径的字段处理
     for k in ("capture_buffer", "buffer_101", "buffer_201", "annotated_buffer", "logs_dir"):
@@ -73,17 +79,4 @@ def load_config(path: Path = CONFIG_PATH) -> Dict:
     fr = inf.get("face_root")
     if fr and not Path(fr).is_absolute():
         inf["face_root"] = str(_ROOT / fr)
-    # 人脸特征库路径：相对路径转绝对
-    fg = inf.get("face_gallery")
-    if fg and not Path(fg).is_absolute():
-        inf["face_gallery"] = str(_ROOT / fg)
     return cfg
-
-
-def resolve_path(rel: str) -> Path:
-    """将相对根目录的路径解析为绝对路径。
-
-    已是绝对路径则原样返回；否则拼接到项目根目录 _ROOT 之后。
-    """
-    p = Path(rel)
-    return p if p.is_absolute() else _ROOT / rel

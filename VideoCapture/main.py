@@ -12,7 +12,7 @@ CONFIG_PATH = Path(__file__).parent / "config.yaml"
 
 
 def cmd_extract(source, device_no=0):
-    from videocapture import CaptureManager, logger
+    from VideoCapture.videocapture import CaptureManager, logger
     with CONFIG_PATH.open(encoding="utf-8") as handle:
         config = yaml.safe_load(handle)
     state = Path(os.environ["AIOT_PIPELINE_STATE"]) if os.environ.get("AIOT_PIPELINE_STATE") else None
@@ -64,7 +64,7 @@ def main():
     extract.add_argument("--device-no", type=int, default=0)
     args = parser.parse_args()
     if args.cmd == "server":
-        from app import app
+        from VideoCapture.app import app
         import uvicorn
         uvicorn.run(app, host="0.0.0.0", port=8000)
         return 0

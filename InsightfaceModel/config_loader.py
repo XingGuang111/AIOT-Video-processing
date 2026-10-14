@@ -7,7 +7,8 @@ from typing import Any, Dict
 
 # _ROOT：项目根目录。当前文件位于 <根>/InsightfaceModel/ 下，
 # 因此向上两级 parent.parent 即为项目根目录；用于把配置中的相对路径解析为绝对路径。
-_ROOT = Path(__file__).resolve().parent.parent
+_ROOT = Path(os.environ.get("AIOT_RESOURCE_ROOT", Path(__file__).resolve().parent.parent))
+_DATA_ROOT = Path(os.environ.get("AIOT_DATA_ROOT", _ROOT))
 # 全局配置文件的默认路径：<根>/config/config.yaml
 CONFIG_PATH = _ROOT / "config" / "config.yaml"
 
@@ -69,7 +70,7 @@ def load_config(path: Path = CONFIG_PATH) -> Dict:
     # 路径转为绝对（相对根目录解析）：仅对已配置且为相对路径的字段处理
     for k in ("capture_buffer", "buffer_101", "buffer_201", "annotated_buffer", "logs_dir"):
         if k in g and g[k] and not Path(g[k]).is_absolute():
-            g[k] = str(_ROOT / g[k])
+            g[k] = str(_DATA_ROOT / g[k])
     # 模型路径相对根目录解析，避免依赖运行时 CWD
     # 仅当值包含路径分隔符时才当作路径解析（纯模型名如 "yolov8n.pt" 交由框架自行查找）
     ym = inf.get("yolo_model")

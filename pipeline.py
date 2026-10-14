@@ -15,8 +15,19 @@ import yaml
 from InsightfaceModel.config_loader import load_config, ConfigError
 from capture_buffers import ready_seconds
 from buffer_cleanup import BufferCleaner
+from runtime_paths import RESOURCE_ROOT, role_command
 
-ROOT = Path(__file__).resolve().parent
+ROOT = RESOURCE_ROOT
+
+
+def _configure_stdio():
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure:
+            reconfigure(encoding="utf-8", errors="replace")
+
+
+_configure_stdio()
 
 
 def parse_device_no(value):
@@ -134,9 +145,9 @@ def run_pipeline(source, device_no=0, buffer_mode=None):
             cleaner.start()
         # 同一解释器拉起子进程，避免系统 Python 与项目虚拟环境混用。
         commands = [
-            ("capture", ["VideoCapture/main.py", "extract", source, "--device-no", str(device_no)]),
-            ("inference", ["InsightfaceModel/main.py", "--device-no", str(device_no)]),
-            ("tag", ["VideoTag/main.py", "--device-no", str(device_no), "--follow"]),
+            ("capture", ["extract", source, "--device-no", str(device_no)]),
+            ("inference", ["--device-no", str(device_no)]),
+            ("tag", ["--device-no", str(device_no), "--follow"]),
         ]
         def request_stop(*_):
             stop_requested.set()
@@ -147,7 +158,7 @@ def run_pipeline(source, device_no=0, buffer_mode=None):
             old_handlers[sig] = signal.signal(sig, request_stop)
         flags = subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0
         for name, arguments in commands:
-            child = subprocess.Popen([sys.executable, "-u", *arguments], cwd=ROOT,
+            child = subprocess.Popen(role_command(name, *arguments), cwd=ROOT,
                                      env=environment, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                                      text=True, encoding="utf-8", errors="replace", creationflags=flags)
             children.append((name, child))

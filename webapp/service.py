@@ -17,8 +17,9 @@ import shutil
 
 from VideoCapture.videocapture.source_parser import desensitize_rtsp_url
 from capture_buffers import second_directories
+from runtime_paths import RESOURCE_ROOT, role_command
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = RESOURCE_ROOT
 VIDEO_NAME = re.compile(r"^[0-9]+(?:_[0-9]+)?(?:_(?:full|partial))?\.mp4$")
 UPLOAD_NAME = re.compile(r"^[0-9a-f]{32}\.(?:mp4|avi|mov|mkv|webm|m4v|ts)$")
 
@@ -123,9 +124,9 @@ class TaskService:
             log_path = self.job_root / f"{identifier}.log"
             try:
                 with log_path.open("w", encoding="utf-8") as log:
-                    child = subprocess.Popen([sys.executable, "-u", str(ROOT / "pipeline.py"),
-                                              "--source", resolved, "--device-no", str(device_no),
-                                              "--buffer-mode", buffer_mode],
+                    child = subprocess.Popen(role_command("pipeline", "--source", resolved,
+                                                          "--device-no", str(device_no),
+                                                          "--buffer-mode", buffer_mode),
                                              cwd=ROOT, env=environment, stdout=log, stderr=subprocess.STDOUT,
                                              creationflags=flags)
             except Exception:

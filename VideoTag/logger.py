@@ -1,10 +1,11 @@
 # -*- coding: utf-8 -*-
 """基础层：统一日志工具，写入根目录 logs/<日期>/tag.log，并输出到控制台。"""
 import logging
+import os
 from pathlib import Path
 from datetime import datetime
 
-_ROOT = Path(__file__).resolve().parent.parent
+_ROOT = Path(os.environ.get("AIOT_DATA_ROOT", Path(__file__).resolve().parent.parent))
 
 
 def init_logger(name: str = "tag") -> logging.Logger:

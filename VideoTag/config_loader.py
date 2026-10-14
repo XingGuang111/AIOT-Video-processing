@@ -5,7 +5,8 @@ import os
 from pathlib import Path
 from typing import Any, Dict
 
-_ROOT = Path(__file__).resolve().parent.parent
+_ROOT = Path(os.environ.get("AIOT_RESOURCE_ROOT", Path(__file__).resolve().parent.parent))
+_DATA_ROOT = Path(os.environ.get("AIOT_DATA_ROOT", _ROOT))
 CONFIG_PATH = _ROOT / "config" / "config.yaml"
 
 
@@ -42,5 +43,5 @@ def load_config(path: Path = CONFIG_PATH) -> Dict:
 
     for k in ("buffer_101", "buffer_201", "annotated_buffer", "logs_dir", "capture_buffer"):
         if k in g and g[k] and not Path(g[k]).is_absolute():
-            g[k] = str(_ROOT / g[k])
+            g[k] = str(_DATA_ROOT / g[k])
     return cfg

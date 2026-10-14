@@ -16,6 +16,7 @@ from fastapi.responses import FileResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
+from app_version import APP_VERSION
 from InsightfaceModel.config_loader import load_config
 from .service import ROOT, TaskService
 from .preview import PreviewReader
@@ -83,7 +84,7 @@ def create_app(config=None):
     def overview():
         demos = [{"label": path.name, "source": str(path.relative_to(ROOT)).replace("\\", "/")}
                  for path in (ROOT / "VideoCapture/demo_videos").glob("*.mp4")]
-        return {"jobs": service.list_jobs(), "devices": service.devices(), "samples": demos,
+        return {"version": APP_VERSION, "jobs": service.list_jobs(), "devices": service.devices(), "samples": demos,
                 "inference_fps": service.config["inference"]["fps"], "server_time": time.time()}
 
     @app.post("/api/tasks", status_code=201)

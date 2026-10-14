@@ -31,8 +31,8 @@ def prepare_runtime_environment() -> Path:
     cache_root = DATA_ROOT / "cache"
     (cache_root / "matplotlib").mkdir(parents=True, exist_ok=True)
     (cache_root / "ultralytics").mkdir(parents=True, exist_ok=True)
-    os.environ.setdefault("MPLCONFIGDIR", str(cache_root / "matplotlib"))
-    os.environ.setdefault("YOLO_CONFIG_DIR", str(cache_root / "ultralytics"))
+    os.environ["MPLCONFIGDIR"] = str(cache_root / "matplotlib")
+    os.environ["YOLO_CONFIG_DIR"] = str(cache_root / "ultralytics")
 
     bundled = RESOURCE_ROOT / "config" / "config.yaml"
     config_dir = DATA_ROOT / "config"
